@@ -1,11 +1,18 @@
-from google.adk.agents import Agent
-from typing import Dict, Any
-from datetime import datetime
-from zoneinfo import ZoneInfo
-import requests
 import logging
+import os
+from datetime import datetime
+from typing import Any, Dict
+from zoneinfo import ZoneInfo
 
-logging.basicConfig(level=logging.INFO)
+import requests
+from google.adk.agents import Agent
+
+logger = logging.getLogger(__name__)
+
+MODEL = os.getenv("ADK_MODEL", "gemini-3-flash-preview")
+GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+REQUEST_TIMEOUT = 5
 
 # ---------------------------------------------------------
 # Geocoding Helper (Supports Any City)
@@ -17,9 +24,9 @@ def get_city_coordinates(city: str) -> Dict[str, Any]:
     """
     try:
         response = requests.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
+            GEOCODING_URL,
             params={"name": city, "count": 1},
-            timeout=5,
+            timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         data = response.json()
@@ -36,11 +43,17 @@ def get_city_coordinates(city: str) -> Dict[str, Any]:
             "longitude": city_data["longitude"],
             "timezone": city_data["timezone"],
             "name": city_data["name"],
-            "country": city_data.get("country", "")
+            "region": city_data.get("admin1", ""),
+            "country": city_data.get("country", ""),
         }
 
     except requests.exceptions.RequestException:
         return {"status": "error", "error_message": "Failed to resolve city name."}
+
+
+def _format_location(location: Dict[str, Any]) -> str:
+    parts = [location["name"], location.get("region"), location.get("country")]
+    return ", ".join(p for p in parts if p)
 
 
 # ---------------------------------------------------------
@@ -48,11 +61,17 @@ def get_city_coordinates(city: str) -> Dict[str, Any]:
 # ---------------------------------------------------------
 def get_weather(city: str) -> Dict[str, Any]:
     """
-    Fetch current weather data for a supported city
-    using the Open-Meteo public API.
+    Fetch current weather data for any city using the Open-Meteo public API.
+
+    Args:
+        city: City name, e.g. "Boston".
+
+    Returns:
+        Dict with status, report (temperature_c, wind_speed_kmh, weather_code,
+        plus the resolved location name/region/country) and error_message.
     """
     city = city.strip().lower()
-    logging.info(f"Weather tool called for city: {city}")
+    logger.info(f"Weather tool called for city: {city}")
 
     location = get_city_coordinates(city)
 
@@ -65,13 +84,13 @@ def get_weather(city: str) -> Dict[str, Any]:
 
     try: #api call
         response = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
+            FORECAST_URL,
             params={
                 "latitude": location["latitude"],
                 "longitude": location["longitude"],
                 "current_weather": True
             },
-            timeout=5
+            timeout=REQUEST_TIMEOUT
         )
 
         response.raise_for_status()
@@ -88,6 +107,7 @@ def get_weather(city: str) -> Dict[str, Any]:
         return {
             "status": "success",
             "report": {
+                "location": _format_location(location),
                 "temperature_c": weather["temperature"],
                 "wind_speed_kmh": weather["windspeed"],
                 "weather_code": weather["weathercode"]
@@ -96,7 +116,7 @@ def get_weather(city: str) -> Dict[str, Any]:
         }
 
     except requests.exceptions.RequestException as e:
-        logging.error(f"Weather API request failed: {e}")
+        logger.error(f"Weather API request failed: {e}")
         return {
             "status": "error",
             "report": None,
@@ -109,10 +129,17 @@ def get_weather(city: str) -> Dict[str, Any]:
 # ---------------------------------------------------------
 def get_current_time(city: str) -> Dict[str, Any]:
     """
-    Fetch current local time for a supported city.
+    Fetch the current local time for any city.
+
+    Args:
+        city: City name, e.g. "Tokyo".
+
+    Returns:
+        Dict with status, report (local_time, timezone, resolved location) and
+        error_message.
     """
     city = city.strip().lower()
-    logging.info(f"Time tool called for city: {city}")
+    logger.info(f"Time tool called for city: {city}")
 
     try:
         location = get_city_coordinates(city)
@@ -130,6 +157,7 @@ def get_current_time(city: str) -> Dict[str, Any]:
         return {
             "status": "success",
             "report": {
+                "location": _format_location(location),
                 "local_time": now.strftime("%Y-%m-%d %H:%M:%S"),
                 "timezone": location["timezone"]
             },
@@ -137,7 +165,7 @@ def get_current_time(city: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logging.error(f"Time tool failed: {e}")
+        logger.error(f"Time tool failed: {e}")
         return {
             "status": "error",
             "report": None,
@@ -146,7 +174,7 @@ def get_current_time(city: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------
-# Agent Instructions and Definition VERY IMPORTANT
+# Agent Instructions and Definition
 # ---------------------------------------------------------
 INSTRUCTION = """
 You are a weather and time assistant.
@@ -155,14 +183,15 @@ Rules:
 - If the user asks about weather, call get_weather.
 - If the user asks about current time, call get_current_time.
 - Always use tools instead of guessing.
-- Don't use the metric sytem and if you need to convert do so.
+- Don't use the metric system; convert to imperial units (°F, mph) before answering.
+- Indicate where the location is too (example if Boston say Boston, MA, United States).
 - If a tool returns an error, explain it clearly to the user.
 """
 
 root_agent = Agent(
     name="weather_time_agent",
-    model="gemini-3-flash-preview",
-    description="Provides real-time weather and time information for supported cities.",
+    model=MODEL,
+    description="Provides real-time weather and time information for any city.",
     instruction=INSTRUCTION,
     tools=[get_weather, get_current_time],
 )

@@ -1,3 +1,14 @@
+"""Snippet: using ADK ToolContext session state to drive a quiz.
+
+Not a runnable agent yet - `quiz` is a placeholder list of (question, answer) pairs.
+"""
+from typing import Any, Dict
+
+from google.adk.tools import ToolContext
+
+quiz = [("What is 2 + 2?", "4")]
+
+
 def start_quiz(tool_context: ToolContext) -> Dict[str, Any]:
     state = tool_context.state
     # Initialize quiz state
